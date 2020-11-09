@@ -2,6 +2,7 @@ import gluoncv as gcv
 import mxnet as mx
 from mxnet.gluon.data.vision import transforms
 from mxnet import autograd
+from matplotlib import pyplot as plt
 
 mx.random.seed(42)
 
@@ -9,15 +10,17 @@ mx.random.seed(42)
 class Learner:
     def __init__(self, net, data_loader, ctx):
         self.net = net
-        self.data_loader_iter = data_loader
+        self.data_loader = data_loader
         self.ctx = ctx
+
+        self.data_loader_iter = iter(self.data_loader)
         self.net.initialize(mx.init.Xavier(), ctx=self.ctx)
         self.trainer = mx.gluon.Trainer(net.collect_params(), 'adam', {'learning_rate': .001})
         self.loss_fn = mx.gluon.loss.SoftmaxCrossEntropyLoss()
 
     def iteration(self, lr=None, take_step=True):
         if lr and (lr != self.trainer.learning_rate):
-            self.trainer.learning_rate(lr)
+            self.trainer.set_learning_rate(lr)
 
         data, label = next(self.data_loader_iter)
         data = data.as_in_context(self.ctx)
@@ -26,7 +29,7 @@ class Learner:
         with mx.autograd.record():
             output = self.net(data)
             loss = self.loss_fn(output, label)
-        loss.backward()
+        autograd.backward(loss)
 
         if take_step:
             self.trainer.step(data.shape[0])
@@ -63,10 +66,8 @@ class ContinuousBatchSampler:
 
 
 sampler = mx.gluon.data.RandomSampler(len(dataset))
-batch_sampler = ContinuousBatchSampler(sampler, batch_size=128)
+batch_sampler = ContinuousBatchSampler(sampler, batch_size=256)
 data_loader = mx.gluon.data.DataLoader(dataset, batch_sampler=batch_sampler)
-
-from matplotlib import pyplot as plt
 
 
 class LRFinder:
@@ -112,7 +113,7 @@ class LRFinder:
         plt.show()
 
 
-class LRfinderStoppingCriteria:
+class LRFinderStoppingCriteria:
     def __init__(self, smoothing=0.3, min_iter=20):
         self.smoothing = smoothing
         self.min_iter = min_iter
