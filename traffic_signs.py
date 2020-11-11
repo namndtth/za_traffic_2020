@@ -8,13 +8,9 @@ from pycocotools.coco import COCO
 
 
 class TrafficSigns(mx.gluon.data.dataset.Dataset):
-    def __init__(self, root, min_object_area=0):
-        self.root = root
-        self.min_object_area = min_object_area
-        self.json_id_to_contiguous = None
-        self.contiguous_id_to_json = None
-        self.classes = None
-        self.items, self.labels = self.load_json()
+    def __init__(self, items, labels):
+        self.items = items
+        self.labels = labels
 
     def __getitem__(self, idx):
         img_path = self.items[idx]
@@ -25,57 +21,58 @@ class TrafficSigns(mx.gluon.data.dataset.Dataset):
     def __len__(self):
         return len(self.items)
 
-    def load_json(self):
-        items = []
-        labels = []
-        anno = os.path.join(self.root, 'train_traffic_sign_dataset.json')
-        traffic_signs = COCO(anno)
-        self.classes = [c['name'] for c in traffic_signs.loadCats(traffic_signs.getCatIds())]
-        self.json_id_to_contiguous = {
-            v: k for k, v in enumerate(traffic_signs.getCatIds())
-        }
 
-        image_ids = sorted(traffic_signs.getImgIds())
+def load_json(root, min_object_area=0):
+    anno = os.path.join(root, 'train_traffic_sign_dataset.json')
+    traffic_signs = COCO(anno)
 
-        for entry in traffic_signs.loadImgs(image_ids):
-            abs_path = self.parse_image_path(entry)
-            if not os.path.exists(abs_path):
-                raise IOError('Images: {} not exists.'.format(abs_path))
-            label = self.check_load_bbox(traffic_signs, entry)
+    json_id_to_contiguous = {
+        v: k for k, v in enumerate(traffic_signs.getCatIds())
+    }
 
-            if not label:
-                continue
-            items.append(abs_path)
-            labels.append(label)
+    items = []
+    labels = []
+    classes = [c['name'] for c in traffic_signs.loadCats(traffic_signs.getCatIds())]
+    image_ids = sorted(traffic_signs.getImgIds())
 
-        print('len item', len(items))
-        return items, labels
+    for entry in traffic_signs.loadImgs(image_ids):
+        abs_path = parse_image_path(root, entry)
+        if not os.path.exists(abs_path):
+            raise IOError('Images: {} not exists.'.format(abs_path))
+        label = check_load_bbox(traffic_signs, entry, json_id_to_contiguous, min_object_area)
 
-    def parse_image_path(self, entry):
-        filename = entry["file_name"]
-        abs_path = os.path.join(self.root, 'images', filename)
-        return abs_path
+        if not label:
+            continue
+        items.append(abs_path)
+        labels.append(label)
 
-    def check_load_bbox(self, traffic_signs, entry):
-        entry_id = entry["id"]
-        width = entry["width"]
-        height = entry["height"]
+    return np.array(items, dtype=object), np.array(labels, dtype=object), classes
 
-        ann_ids = traffic_signs.getAnnIds(imgIds=entry_id, iscrowd=None)
-        objs = traffic_signs.loadAnns(ann_ids)
+def parse_image_path(root, entry):
+    filename = entry["file_name"]
+    abs_path = os.path.join(root, 'images', filename)
+    return abs_path
 
-        valid_objs = []
+def check_load_bbox(traffic_signs, entry, json_id_to_contiguous, min_object_area):
+    entry_id = entry["id"]
+    width = entry["width"]
+    height = entry["height"]
 
-        for obj in objs:
-            if obj["area"] < self.min_object_area:
-                continue
-            from gluoncv.utils.bbox import bbox_clip_xyxy, bbox_xywh_to_xyxy
-            xmin, ymin, xmax, ymax = bbox_clip_xyxy(bbox_xywh_to_xyxy(obj['bbox']), width, height)
+    ann_ids = traffic_signs.getAnnIds(imgIds=entry_id, iscrowd=None)
+    objs = traffic_signs.loadAnns(ann_ids)
 
-            if obj['area'] > 0 and xmax > xmin and ymax > ymin:
-                contiguous_cid = self.json_id_to_contiguous[obj['category_id']]
-                valid_objs.append([xmin, ymin, xmax, ymax, contiguous_cid])
+    valid_objs = []
 
-        return valid_objs
+    for obj in objs:
+        if obj["area"] < min_object_area:
+            continue
+        from gluoncv.utils.bbox import bbox_clip_xyxy, bbox_xywh_to_xyxy
+        xmin, ymin, xmax, ymax = bbox_clip_xyxy(bbox_xywh_to_xyxy(obj['bbox']), width, height)
+
+        if obj['area'] > 0 and xmax > xmin and ymax > ymin:
+            contiguous_cid = json_id_to_contiguous[obj['category_id']]
+            valid_objs.append([xmin, ymin, xmax, ymax, contiguous_cid])
+
+    return valid_objs
 
 
