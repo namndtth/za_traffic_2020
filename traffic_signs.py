@@ -48,10 +48,12 @@ def load_json(root, min_object_area=0):
 
     return np.array(items, dtype=object), np.array(labels, dtype=object), classes
 
+
 def parse_image_path(root, entry):
     filename = entry["file_name"]
     abs_path = os.path.join(root, 'images', filename)
     return abs_path
+
 
 def check_load_bbox(traffic_signs, entry, json_id_to_contiguous, min_object_area):
     entry_id = entry["id"]
@@ -74,5 +76,3 @@ def check_load_bbox(traffic_signs, entry, json_id_to_contiguous, min_object_area
             valid_objs.append([xmin, ymin, xmax, ymax, contiguous_cid])
 
     return valid_objs
-
-

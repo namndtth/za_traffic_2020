@@ -6,13 +6,10 @@ import time
 import warnings
 import numpy as np
 import mxnet as mx
-from mxnet import nd
+
 from mxnet import gluon
 from mxnet import autograd
-import gluoncv as gcv
 
-gcv.utils.check_version('0.6.0')
-from gluoncv import data as gdata
 from gluoncv import utils as gutils
 from gluoncv.model_zoo import get_model
 from gluoncv.data.batchify import Tuple, Stack, Pad
@@ -20,16 +17,7 @@ from gluoncv.data.transforms.presets.yolo import YOLO3DefaultTrainTransform
 from gluoncv.data.transforms.presets.yolo import YOLO3DefaultValTransform
 from gluoncv.data.dataloader import RandomTransformDataLoader
 from gluoncv.utils.metrics.voc_detection import VOC07MApMetric
-from gluoncv.utils.metrics.coco_detection import COCODetectionMetric
 from gluoncv.utils import LRScheduler, LRSequential
-
-from mxnet.contrib import amp
-
-try:
-    import horovod.mxnet as hvd
-except ImportError:
-    hvd = None
-
 import traffic_signs as ts
 
 
@@ -40,12 +28,12 @@ def parse_args():
     parser.add_argument('--data-shape', type=int, default=608,
                         help="Input data shape for evaluation, use 320, 416, 608... " +
                              "Training is with random shapes from (320 to 608).")
-    parser.add_argument('--batch-size', type=int, default=4,
+    parser.add_argument('--batch-size', type=int, default=2,
                         help='Training mini-batch size')
     parser.add_argument('--dataset', type=str, default='custom',
-                        help='Training dataset. Now support voc.')
+                        help='Training dataset.')
     parser.add_argument('--num-workers', '-j', dest='num_workers', type=int,
-                        default=4, help='Number of data workers, you can use larger '
+                        default=2, help='Number of data workers, you can use larger '
                                         'number to accelerate data loading, if you CPU and GPUs are powerful.')
     parser.add_argument('--gpus', type=str, default='0',
                         help='Training with GPUs, you can specify 1,3 for example.')
@@ -57,7 +45,7 @@ def parse_args():
     parser.add_argument('--start-epoch', type=int, default=0,
                         help='Starting epoch for resuming, default is 0 for new training.'
                              'You can specify it to 100 for example to start from 100 epoch.')
-    parser.add_argument('--lr', type=float, default=3e-4,
+    parser.add_argument('--lr', type=float, default=5e-2,
                         help='Learning rate, default is 0.001')
     parser.add_argument('--lr-mode', type=str, default='step',
                         help='learning rate scheduler mode. options are step, poly and cosine.')
@@ -77,7 +65,7 @@ def parse_args():
                         help='Weight decay, default is 5e-4')
     parser.add_argument('--log-interval', type=int, default=100,
                         help='Logging mini-batch interval. Default is 100.')
-    parser.add_argument('--save-prefix', type=str, default='models/zalo_challenge',
+    parser.add_argument('--save-prefix', type=str, default='models/traffic_sign_',
                         help='Saving parameter prefix')
     parser.add_argument('--save-interval', type=int, default=10,
                         help='Saving parameters epoch interval, best model will always be saved.')
@@ -100,18 +88,13 @@ def parse_args():
     parser.add_argument('--no-mixup-epochs', type=int, default=20,
                         help='Disable mixup training if enabled in the last N epochs.')
     parser.add_argument('--label-smooth', action='store_true', help='Use label smoothing.')
-    parser.add_argument('--amp', action='store_true',
-                        help='Use MXNet AMP for mixed precision training.')
-    parser.add_argument('--horovod', action='store_true',
-                        help='Use MXNet Horovod for distributed training. Must be run with OpenMPI. '
-                             '--gpus is ignored when using --horovod.')
 
     args = parser.parse_args()
     return args
 
 
 def get_dataset(dataset, args):
-    items, labels, classes = ts.load_json('/newDriver/nam/traffic_signs_data/za_traffic_2020/traffic_train')
+    items, labels, classes = ts.load_json('za_traffic_2020/traffic_train')
     train_size = int(len(items) * 0.8)
 
     indices = np.arange(0, len(items))
@@ -126,7 +109,7 @@ def get_dataset(dataset, args):
 
     val_metric = VOC07MApMetric(iou_thresh=0.5, class_names=classes)
 
-    return train_dataset, val_dataset, val_metric
+    return train_dataset, val_dataset, val_metric, classes
 
 
 def get_dataloader(net, train_dataset, val_dataset, data_shape, batch_size, num_workers, args):
@@ -143,6 +126,7 @@ def get_dataloader(net, train_dataset, val_dataset, data_shape, batch_size, num_
         train_loader = RandomTransformDataLoader(
             transform_fns, train_dataset, batch_size=batch_size, interval=10, last_batch='rollover',
             shuffle=True, batchify_fn=batchify_fn, num_workers=num_workers)
+
     val_batchify_fn = Tuple(Stack(), Pad(pad_val=-1))
     val_loader = gluon.data.DataLoader(
         val_dataset.transform(YOLO3DefaultValTransform(width, height)),
@@ -220,19 +204,12 @@ def train(net, train_data, val_data, eval_metric, batch_size, ctx, args):
                     step_factor=args.lr_decay, power=2),
     ])
 
-    if args.horovod:
-        hvd.broadcast_parameters(net.collect_params(), root_rank=0)
-        trainer = hvd.DistributedTrainer(
-            net.collect_params(), 'sgd',
-            {'wd': args.wd, 'momentum': args.momentum, 'lr_scheduler': lr_scheduler})
-    else:
-        trainer = gluon.Trainer(
-            net.collect_params(), 'sgd',
-            {'wd': args.wd, 'momentum': args.momentum, 'lr_scheduler': lr_scheduler},
-            kvstore='local', update_on_kvstore=(False if args.amp else None))
+    # trainer = gluon.Trainer(
+    #     net.collect_params(), 'sgd',
+    #     {'wd': args.wd, 'momentum': args.momentum, 'lr_scheduler': lr_scheduler},
+    #     kvstore='local', update_on_kvstore=(False if args.amp else None))
 
-    if args.amp:
-        amp.init_trainer(trainer)
+    trainer = gluon.Trainer(net.collect_params(), 'adam', {'learning_rate': args.lr})
 
     # targets
     sigmoid_ce = gluon.loss.SigmoidBinaryCrossEntropyLoss(from_sigmoid=False)
@@ -293,68 +270,54 @@ def train(net, train_data, val_data, eval_metric, batch_size, ctx, args):
                     center_losses.append(center_loss)
                     scale_losses.append(scale_loss)
                     cls_losses.append(cls_loss)
-                if args.amp:
-                    with amp.scale_loss(sum_losses, trainer) as scaled_loss:
-                        autograd.backward(scaled_loss)
-                else:
-                    autograd.backward(sum_losses)
+                autograd.backward(sum_losses)
             trainer.step(batch_size)
-            if (not args.horovod or hvd.rank() == 0):
-                obj_metrics.update(0, obj_losses)
-                center_metrics.update(0, center_losses)
-                scale_metrics.update(0, scale_losses)
-                cls_metrics.update(0, cls_losses)
-                if args.log_interval and not (i + 1) % args.log_interval:
-                    name1, loss1 = obj_metrics.get()
-                    name2, loss2 = center_metrics.get()
-                    name3, loss3 = scale_metrics.get()
-                    name4, loss4 = cls_metrics.get()
-                    logger.info(
-                        '[Epoch {}][Batch {}], LR: {:.2E}, Speed: {:.3f} samples/sec, {}={:.3f}, {}={:.3f}, {}={:.3f}, {}={:.3f}'.format(
-                            epoch, i, trainer.learning_rate, args.batch_size / (time.time() - btic), name1, loss1,
-                            name2, loss2, name3, loss3, name4, loss4))
-                btic = time.time()
 
-        if (not args.horovod or hvd.rank() == 0):
-            name1, loss1 = obj_metrics.get()
-            name2, loss2 = center_metrics.get()
-            name3, loss3 = scale_metrics.get()
-            name4, loss4 = cls_metrics.get()
-            logger.info('[Epoch {}] Training cost: {:.3f}, {}={:.3f}, {}={:.3f}, {}={:.3f}, {}={:.3f}'.format(
-                epoch, (time.time() - tic), name1, loss1, name2, loss2, name3, loss3, name4, loss4))
-            if not (epoch + 1) % args.val_interval:
-                # consider reduce the frequency of validation to save time
-                map_name, mean_ap = validate(net, val_data, ctx, eval_metric)
-                val_msg = '\n'.join(['{}={}'.format(k, v) for k, v in zip(map_name, mean_ap)])
-                logger.info('[Epoch {}] Validation: \n{}'.format(epoch, val_msg))
-                current_map = float(mean_ap[-1])
-            else:
-                current_map = 0.
-            save_params(net, best_map, current_map, epoch, args.save_interval, args.save_prefix)
+            obj_metrics.update(0, obj_losses)
+            center_metrics.update(0, center_losses)
+            scale_metrics.update(0, scale_losses)
+            cls_metrics.update(0, cls_losses)
+            if args.log_interval and not (i + 1) % args.log_interval:
+                name1, loss1 = obj_metrics.get()
+                name2, loss2 = center_metrics.get()
+                name3, loss3 = scale_metrics.get()
+                name4, loss4 = cls_metrics.get()
+                logger.info(
+                    '[Epoch {}][Batch {}], LR: {:.2E}, Speed: {:.3f} samples/sec, '
+                    '{}={:.3f}, {}={:.3f}, {}={:.3f}, {}={:.3f}'
+                    .format(epoch, i, trainer.learning_rate, args.batch_size / (time.time() - btic),
+                            name1, loss1, name2, loss2, name3, loss3, name4, loss4))
+            btic = time.time()
+
+        name1, loss1 = obj_metrics.get()
+        name2, loss2 = center_metrics.get()
+        name3, loss3 = scale_metrics.get()
+        name4, loss4 = cls_metrics.get()
+        logger.info('[Epoch {}] Training cost: {:.3f}, {}={:.3f}, {}={:.3f}, {}={:.3f}, {}={:.3f}'.format(
+            epoch, (time.time() - tic), name1, loss1, name2, loss2, name3, loss3, name4, loss4))
+        if not (epoch + 1) % args.val_interval:
+            # consider reduce the frequency of validation to save time
+            map_name, mean_ap = validate(net, val_data, ctx, eval_metric)
+            val_msg = '\n'.join(['{}={}'.format(k, v) for k, v in zip(map_name, mean_ap)])
+            logger.info('[Epoch {}] Validation: \n{}'.format(epoch, val_msg))
+            current_map = float(mean_ap[-1])
+        else:
+            current_map = 0.
+        save_params(net, best_map, current_map, epoch, args.save_interval, args.save_prefix)
 
 
 if __name__ == '__main__':
 
     args = parse_args()
 
-    if args.amp:
-        amp.init()
-
-    if args.horovod:
-        if hvd is None:
-            raise SystemExit("Horovod not found, please check if you installed it correctly.")
-        hvd.init()
-
     # fix seed for mxnet, numpy and python builtin random generator.
     gutils.random.seed(args.seed)
 
+    train_dataset, val_dataset, eval_metric, classes = get_dataset(args.dataset, args)
+
     # training contexts
-    if args.horovod:
-        ctx = [mx.gpu(hvd.local_rank())]
-    else:
-        ctx = [mx.gpu(int(i)) for i in args.gpus.split(',') if i.strip()]
-        ctx = ctx if ctx else [mx.cpu()]
-    items, labels, classes = ts.load_json('/newDriver/nam/traffic_signs_data/za_traffic_2020/traffic_train')
+    ctx = [mx.gpu(int(i)) for i in args.gpus.split(',') if i.strip()]
+    ctx = ctx if ctx else [mx.cpu()]
     # network
     net_name = '_'.join(('yolo3', args.network, args.dataset))
     args.save_prefix += net_name
@@ -376,10 +339,9 @@ if __name__ == '__main__':
             async_net.initialize()
 
     # training data
-    batch_size = (args.batch_size // hvd.size()) if args.horovod else args.batch_size
-    train_dataset, val_dataset, eval_metric = get_dataset(args.dataset, args)
+
     train_data, val_data = get_dataloader(
-        async_net, train_dataset, val_dataset, args.data_shape, batch_size, args.num_workers, args)
+        async_net, train_dataset, val_dataset, args.data_shape, args.batch_size, args.num_workers, args)
 
     # training
-    train(net, train_data, val_data, eval_metric, batch_size, ctx, args)
+    train(net, train_data, val_data, eval_metric, args.batch_size, ctx, args)
